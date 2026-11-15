@@ -1,64 +1,64 @@
-# Один и тот же расчёт соседей, по-разному уложенный в памяти видеокарты
+# The same neighbor calculation, packed two ways in GPU memory
 
-Лапласиан в кубе смотрит на клетку и на всех её соседей: 6 по граням, 12 по рёбрам и 8 по углам. Это 27 чисел. Такой проход нужен в расчёте давления, тепла и любой гладкой поправки поля.
+A Laplacian on a cube looks at a cell and at every neighbor: 6 across the faces, 12 across the edges, and 8 at the corners. That is 27 numbers. The same pass shows up in pressure, heat, and any smooth correction of a field.
 
-Узкое место здесь не арифметика. Узкое место — успеть прочитать числа из памяти. Два ядра считают одну и ту же формулу. Наивное каждый раз тянет соседей из общей памяти карты. Второе складывает кусок поля в быструю память блока, а соседей по одной оси передаёт между нитями прямо в регистрах, командами `__shfl_up_sync` и `__shfl_down_sync`.
+The tight part is not the arithmetic. The tight part is reading the numbers from memory in time. Two kernels compute the same formula. The naive one fetches neighbors from the card’s main memory on every cell. The other one stages a block of the field in the fast memory of the thread block, and passes neighbors along one axis from thread to thread through registers, with `__shfl_up_sync` and `__shfl_down_sync`.
 
-Рядом та же матрица собрана как разреженная таблица и умножена библиотекой cuSPARSE. Таблица хранит для каждой клетки 27 номеров соседей. Стенсил эти номера знает из формы сетки и поэтому их не хранит.
+Beside them, the same matrix is stored as a sparse table and multiplied by cuSPARSE. The table keeps 27 neighbor indices per cell. The stencil knows those indices from the shape of the grid, so it does not store them.
 
-## Время на RTX 4070 Laptop
+## Time on an RTX 4070 Laptop
 
-Сетка 128³. Прогон без профилировщика.
+Grid 128³. This run is outside the profiler.
 
-![Время тайлового ядра, наивного CUDA-ядра и cuSPARSE](figures/timings.png)
+![Time for the tiled kernel, the naive CUDA kernel, and cuSPARSE](figures/timings.png)
 
-Тайловый стенсил и наивное ядро идут одинаково, 0.115 и 0.117 миллисекунды. Общий кэш карты на таком объёме уже переиспользует соседей, и явная укладка времени не снимает. Против разреженной таблицы выигрыш есть: 1.85 миллисекунды у cuSPARSE, стенсил быстрее в 16 раз.
+The tiled stencil and the naive kernel take the same time, 0.115 ms and 0.117 ms. At this size the card’s shared cache already reuses neighbors, so the explicit packing does not shorten the run. Against the sparse table there is a gain: cuSPARSE takes 1.85 ms, and the stencil is 16× faster.
 
-Отличие от того же расчёта на процессоре: 3.18×10⁻⁷. Порог был 10⁻⁶, он взят.
+The difference from the same calculation on the CPU is 3.18×10⁻⁷. The limit was 10⁻⁶. It is met.
 
-## Что сказал профилировщик
+## What the profiler said
 
-Nsight Compute смотрел одно ядро `stencil_tiled`.
+Nsight Compute looked at one `stencil_tiled` kernel.
 
 | | |
 | --- | --- |
-| Длительность | 143 микросекунды |
-| Доля пиковой DRAM | 22.9%, это 58.6 ГБ/с из 256 |
-| Попадание в кэш L2 | 81.6% |
-| Попадание в кэш L1 | 14.8% |
-| Занятость мультипроцессоров | 94.6% из 100% |
-| Доля пика FP32 | 5% |
+| Duration | 143 microseconds |
+| Fraction of peak DRAM | 22.9%, which is 58.6 GB/s out of 256 |
+| L2 cache hit rate | 81.6% |
+| L1 cache hit rate | 14.8% |
+| Multiprocessor occupancy | 94.6% of 100% |
+| Fraction of FP32 peak | 5% |
 
-Порог задания был 80% пиковой DRAM. Он не взят. Консоль программы печатает 146 ГБ/с и 57%, но это объём входа и выхода, делённый на время. До шины памяти доходит меньше: сетка помещается в L2, и после прогрева соседи читаются оттуда.
+The requested limit was 80% of peak DRAM. It is missed. The program’s own console prints 146 GB/s and 57%, but that is the size of the input plus the output, divided by time. Less than that reaches the memory bus: the grid fits in L2, and after warmup the neighbors are read from there.
 
-Карта в машине — RTX 4070 Laptop, 36 мультипроцессоров. Сборка шла под sm_89.
+The card in the machine is an RTX 4070 Laptop, 36 multiprocessors. The binary was built for sm_89.
 
-На процессоре Apple M3, ещё до видеокарты, тот же стенсил в float совпал с double до 4.0×10⁻⁷. PyTorch на этой видеокарте не запускался.
+On an Apple M3, before any GPU was available, the same stencil in float matched double to 4.0×10⁻⁷. PyTorch was not run on this GPU.
 
-## Как снять скриншот Roofline
+## How to capture the Roofline screenshot
 
-Картинки из Nsight в репозитории нет. Окно открывается только на компьютере, где лежит отчёт `runs\profile_report.ncu-rep`.
+There is no Nsight image in the repository. The window opens only on the computer that has `runs\profile_report.ncu-rep`.
 
-1. Открой Nsight Compute. Он ставится вместе с CUDA Toolkit. Если команда `ncu` уже находилась, программа тоже установлена: в меню Пуск она называется Nsight Compute.
-2. File → Open File и выбери `C:\Users\lopat\random-projects\CUDA-Stencil-Poisson\runs\profile_report.ncu-rep`.
-3. В списке ядер выбери `stencil_tiled`. Возьми один из последних запусков, не первый: первые были прогревом.
-4. Открой страницу Details и найди блок GPU Speed Of Light Roofline Chart.
-5. Снимок: Win+Shift+S, сохрани файл как `figures\roofline.png`.
+1. Open Nsight Compute. It is installed with the CUDA Toolkit. If the `ncu` command already runs, the app is installed too: in the Start menu it is called Nsight Compute.
+2. File → Open File, and choose `C:\Users\lopat\random-projects\CUDA-Stencil-Poisson\runs\profile_report.ncu-rep`.
+3. In the kernel list, select `stencil_tiled`. Pick one of the later launches, not the first. The first launches were warmup.
+4. Open the Details page and find GPU Speed Of Light Roofline Chart.
+5. Capture the window with Win+Shift+S and save it as `figures\roofline.png`.
 
-Этого файла достаточно. Его можно положить рядом и дописать в этот README одной строкой с картинкой.
+That file is enough. Drop it next to the others and add one image line to this README.
 
-## Запуск на Windows
+## Run on Windows
 
-Нужны CUDA Toolkit и компилятор C++ из Visual Studio, пункт Desktop development with C++.
+You need the CUDA Toolkit and the Visual Studio C++ compiler, with the “Desktop development with C++” workload.
 
 ```bat
 profile_4060.bat
 ```
 
-Скрипт сам находит `nvcc`, `cl.exe` и `ncu`, собирает программу и гонит её под Nsight. Этот прогон занимает несколько минут: профилировщик повторяет каждое ядро десятки раз, и напечатанные там миллисекунды — время повторов. Скорость стенсила печатает отдельный запуск уже собранного файла:
+The script finds `nvcc`, `cl.exe`, and `ncu`, builds the program, and runs it under Nsight. That pass takes several minutes. The profiler repeats every kernel dozens of times, and the milliseconds printed in that window are the time of those repeats. The stencil’s own speed is printed by running the built binary on its own:
 
 ```bat
 runs\stencil_app.exe
 ```
 
-Отчёт для Roofline лежит в `runs\profile_report.ncu-rep`.
+The Roofline report is `runs\profile_report.ncu-rep`.
