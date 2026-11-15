@@ -1,0 +1,3 @@
+runs/stencil_cpu
+runs/*.bin
+.DS_Store
